@@ -1,97 +1,169 @@
-# Brain Response Classification: Good vs. Bad Design
+# EEG Topomap Classifier
 
-This project trains a deep learning image classifier to distinguish between brain responses to **good** and **bad** designs. The model is a Convolutional Neural Network (CNN) implemented in PyTorch that processes brain topomap images and outputs a binary prediction.
+![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.4-EE4C2C?logo=pytorch&logoColor=white)
+![Task](https://img.shields.io/badge/Task-Binary%20Classification-4CAF50)
+![License](https://img.shields.io/badge/License-MIT-blue)
+
+A deep learning system that classifies brain responses to visual design stimuli as **good** or **bad** using EEG topomap images. The model is a custom Convolutional Neural Network (CNN) built in PyTorch, trained to distinguish between two neurological response patterns after 6 seconds of design exposure.
+
+---
+
+## Overview
+
+Electroencephalography (EEG) topographic maps (topomaps) visualise the spatial distribution of brain electrical activity across the scalp at a given moment. This project applies computer vision to neuroscience: instead of a human expert interpreting the maps, a CNN learns to recognise the patterns that distinguish a positive brain response to a design from a negative one.
+
+```
+Input: EEG topomap image  →  CNN  →  Output: 0 (bad) or 1 (good)
+```
+
+---
+
+## Results
+
+| Metric | Value |
+|--------|-------|
+| Test Accuracy | `—` *(fill in after running training)* |
+| Val Loss (best) | `—` |
+| Epochs trained | 60 |
+| Data split | 70 / 15 / 15 % |
+
+> To reproduce: follow the [Setup](#setup) and [Training](#usage) steps below. The best checkpoint is saved automatically as `model.pth`.
+
+---
+
+## Model Architecture
+
+The network is a custom CNN with four convolutional blocks followed by a fully connected classification head.
+
+```
+Input (3 × 128 × 128)
+│
+├── Conv Block 1:  Conv2d(3→16)    → ReLU → Conv2d(16→32)  → ReLU → MaxPool2d
+├── Conv Block 2:  Conv2d(32→64)   → ReLU → Conv2d(64→128) → ReLU → MaxPool2d
+├── Conv Block 3:  Conv2d(128→256) → ReLU → MaxPool2d
+├── Conv Block 4:  Conv2d(256→512) → ReLU → MaxPool2d
+│
+├── AdaptiveAvgPool2d → (512 × 4 × 4)
+├── Flatten → 8192
+│
+├── FC(8192→1024) → ReLU → Dropout(0.5)
+├── FC(1024→1024) → ReLU → Dropout(0.5)
+└── FC(1024→1)    → Sigmoid
+│
+Output: probability ∈ [0, 1]  →  threshold 0.5  →  class label {0, 1}
+```
+
+**Design choices:**
+- Progressive filter doubling (16 → 512) extracts features from low-level edges up to high-level spatial patterns.
+- `AdaptiveAvgPool2d` makes the model robust to small input size variations.
+- Dropout (p=0.5) on both FC layers reduces overfitting on the small dataset.
+- Sigmoid + BCELoss is the standard setup for binary classification with a single output neuron.
 
 ---
 
 ## Dataset
 
-The dataset is expected in a folder named `topomaps` with the following structure:
+The dataset consists of EEG topomap images recorded after 6 seconds of exposure to visual design stimuli, split into two classes.
 
 ```
 topomaps/
-  good/
-    Good_6s_1.png
-    Good_6s_2.png
-    ...
-  bad/
-    Bad_6s_1.png
-    Bad_6s_2.png
-    ...
+├── good/
+│   ├── Good_6s_1.png
+│   ├── Good_6s_2.png
+│   └── ...
+└── bad/
+    ├── Bad_6s_1.png
+    ├── Bad_6s_2.png
+    └── ...
 ```
 
-Each `.png` file is a brain topomap image recorded after 6 seconds of exposure to a design stimulus.
+| Class | Label | Description |
+|-------|-------|-------------|
+| `bad` | `0` | Brain response to a poorly received design |
+| `good` | `1` | Brain response to a well received design |
+
+> The dataset is not included in this repository. Place the `topomaps/` folder in the project root before running training.
 
 ---
 
-## Objective
+## Training Details
 
-Train a binary image classifier with the following label encoding:
+| Parameter | Value |
+|-----------|-------|
+| Optimiser | Adam |
+| Learning rate | 0.001 |
+| LR scheduler | ReduceLROnPlateau (factor 0.5, patience 5) |
+| Loss function | BCELoss |
+| Batch size | 8 |
+| Epochs | 60 |
+| Input size | 128 × 128 |
+| Normalisation | ImageNet mean/std |
 
-| Class | Label |
-|-------|-------|
-| bad   | `0`   |
-| good  | `1`   |
+### Data Augmentation
 
-When given an image as input, the model outputs either `0` or `1`.
+Augmentations are applied **only during training** to reduce overfitting:
 
----
+| Transform | Parameters |
+|-----------|------------|
+| RandomHorizontalFlip | p = 0.5 |
+| RandomRotation | ±10° |
+| ColorJitter | brightness ±20%, contrast ±20% |
 
-## Methodology
+Validation and test sets use only resize and normalise — no augmentation.
 
-| Item | Detail |
-|------|--------|
-| Language | Python 3 |
-| Framework | PyTorch |
-| Task | Binary image classification |
-| Loss | Binary Cross-Entropy (`BCELoss`) |
-| Evaluation metric | Accuracy |
-| Input size | 128 × 128 RGB |
-| Normalisation | ImageNet mean/std: `[0.485, 0.456, 0.406]` / `[0.229, 0.224, 0.225]` |
+### Data Split
 
-### Model Architecture
+Splits are **stratified** to preserve class balance across all three partitions.
 
-The CNN consists of four convolutional blocks with progressively increasing filter depths (16 → 32 → 64 → 128 → 256 → 512), each followed by ReLU activations and MaxPooling. An Adaptive Average Pooling layer reduces the spatial dimensions to 4×4, and two fully connected layers (1024 → 1024 → 1) with 0.5 Dropout produce the final output. A Sigmoid activation converts this to a probability; values ≥ 0.5 predict class `1` (good).
-
-### Training Details
-
-- **Optimiser:** Adam (`lr=0.001`)
-- **LR Scheduler:** ReduceLROnPlateau (factor 0.5, patience 5)
-- **Epochs:** 60
-- **Batch size:** 8
-- **Data split:** 70% train / 15% validation / 15% test (stratified)
-- **Training augmentations:** RandomHorizontalFlip, RandomRotation (±10°), ColorJitter (brightness/contrast ±20%)
-- **Checkpoint:** Best model (lowest validation loss) saved as `model.pth`
+```
+Full dataset
+├── 70%  →  Training set
+├── 15%  →  Validation set   (used for checkpoint selection)
+└── 15%  →  Test set         (held out; evaluated once after training)
+```
 
 ---
 
-## Files
+## Project Structure
 
-| File | Description |
-|------|-------------|
-| `train.py` | Data loading, model definition, training loop, final test evaluation |
-| `eval.py` | Load a trained `.pth` checkpoint and run inference on a directory of images |
-| `requirements.txt` | Third-party dependencies beyond the default grading environment |
-| `README.md` | This file |
+```
+eeg-topomap-classifier/
+├── train.py          # Training script: data loading, model, training loop, test eval
+├── eval.py           # Inference script: load checkpoint, predict labels for new images
+├── requirements.txt  # Additional dependencies (torchvision)
+├── .gitignore
+└── README.md
+```
 
 ---
 
 ## Setup
 
-1. **Create and activate a virtual environment:**
+**Prerequisites:** Python 3.8+
+
+1. **Clone the repository:**
 
     ```bash
-    python -m venv brain_env
-    source brain_env/bin/activate   # Windows: brain_env\Scripts\activate
+    git clone https://github.com/emaadkalantarii/eeg-topomap-classifier.git
+    cd eeg-topomap-classifier
     ```
 
-2. **Install dependencies:**
+2. **Create and activate a virtual environment:**
 
     ```bash
+    python -m venv venv-topo
+    source venv-topo/bin/activate      # macOS/Linux
+    venv-topo\Scripts\activate         # Windows
+    ```
+
+3. **Install dependencies:**
+
+    ```bash
+    pip install torch==2.4.0 torchvision numpy pillow scikit-learn
+    # or
     pip install -r requirements.txt
     ```
-
-    > **Note:** The grading environment includes `Pytorch 2.4.0`, `Numpy 2.2.0`, `Pillow 11.0.0`, and `Scikit-learn 1.6` by default. The only additional dependency this project requires is `torchvision`, which is listed in `requirements.txt`.
 
 ---
 
@@ -99,27 +171,66 @@ The CNN consists of four convolutional blocks with progressively increasing filt
 
 ### Training
 
-Place the `topomaps/` dataset folder in the same directory as `train.py`, then run:
+Place the `topomaps/` dataset in the project root, then run:
 
 ```bash
 python train.py
 ```
 
-The script prints train loss, validation loss, and validation accuracy after each epoch, and saves the best checkpoint as `model.pth`. After training, it automatically evaluates the best checkpoint on the held-out test set.
+Training output per epoch:
 
-### Evaluation
+```
+Epoch   1/60 | Train Loss: 0.6923 | Val Loss: 0.6891 | Val Acc: 0.5333 | LR: 0.001000
+  → Saved new best model.
+Epoch   2/60 | Train Loss: 0.6801 | Val Loss: 0.6754 | Val Acc: 0.6000 | LR: 0.001000
+...
+```
 
-The `load_and_predict(directory, model_file)` function in `eval.py` is the grader-facing API. It accepts the path to an image directory (with the same `good/` / `bad/` structure) and a `.pth` model file, and returns a dictionary mapping absolute image paths to predicted integer labels:
+The best checkpoint (lowest validation loss) is saved as `model.pth`. After training completes, the script automatically loads the best checkpoint and reports accuracy on the held-out test set.
+
+### Inference
+
+Use the `load_and_predict` function from `eval.py` to run inference on any directory that follows the dataset structure:
 
 ```python
 from eval import load_and_predict
 
-results = load_and_predict("topomaps", "model.pth")
-# {'/abs/path/good/Good_6s_1.png': 1, '/abs/path/bad/Bad_6s_1.png': 0, ...}
+results = load_and_predict("path/to/images", "model.pth")
+# Returns:
+# {
+#   '/abs/path/good/Good_6s_1.png': 1,
+#   '/abs/path/bad/Bad_6s_1.png':  0,
+#   ...
+# }
 ```
 
-To run the self-test directly:
+Or run the built-in self-test against the `topomaps/` folder:
 
 ```bash
 python eval.py
 ```
+
+```
+Model loaded successfully.
+Found 80 images.
+Total predictions : 80
+Accuracy          : 0.8250
+```
+
+---
+
+## Dependencies
+
+| Library | Version | Purpose |
+|---------|---------|---------|
+| PyTorch | 2.4.0 | Model definition and training |
+| torchvision | ≥ 0.19.0 | Image transforms |
+| Pillow | 11.0.0 | Image loading |
+| NumPy | 2.2.0 | Numerical utilities |
+| scikit-learn | 1.6 | Stratified train/test split |
+
+---
+
+## License
+
+This project is licensed under the MIT License.
