@@ -68,11 +68,25 @@ class BrainModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 def get_device():
+    """
+    Returns a CUDA device if a working NVIDIA GPU is available, otherwise CPU.
+    Validates CUDA by running a test tensor operation — torch.device('cuda')
+    alone never raises, so a real operation is needed to confirm the GPU works.
+    """
     if torch.cuda.is_available():
         try:
+            # Validate with an actual GPU operation, not just device object creation
+            test = torch.zeros(1).cuda()
+            del test
+            torch.cuda.empty_cache()
+
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"GPU detected: {gpu_name}")
             return torch.device('cuda')
         except Exception as e:
-            print(f"CUDA error ({e}), falling back to CPU.")
+            print(f"CUDA error during validation ({e}), falling back to CPU.")
+
+    print("No GPU found. Using CPU.")
     return torch.device('cpu')
 
 
@@ -145,7 +159,9 @@ def load_and_predict(directory, model_file):
     print(f"Found {len(image_files)} images.")
 
     labels_dict = {}
-    batch_size  = 16 if device.type == 'cuda' else 4
+    batch_size  = 64 if device.type == 'cuda' else 4
+
+    using_gpu = device.type == 'cuda'
 
     with torch.no_grad():
         for i in range(0, len(image_files), batch_size):
@@ -164,7 +180,8 @@ def load_and_predict(directory, model_file):
             if not batch_tensors:
                 continue
 
-            outputs = model(torch.stack(batch_tensors).to(device))
+            # non_blocking=True overlaps CPU→GPU transfer with other GPU work
+            outputs = model(torch.stack(batch_tensors).to(device, non_blocking=using_gpu))
 
             for img_path, prob in zip(valid_paths, outputs.cpu().tolist()):
                 # prob is a list with one element because the model output shape is (batch, 1)
