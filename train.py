@@ -132,13 +132,33 @@ class BrainModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 def get_device():
+    """
+    Returns a CUDA device if a working NVIDIA GPU is available, otherwise CPU.
+    Validates CUDA by running a test tensor operation — torch.device('cuda')
+    alone never raises, so a real operation is needed to confirm the GPU works.
+    """
     if torch.cuda.is_available():
         try:
+            # Validate with an actual GPU operation, not just device object creation
+            test = torch.zeros(1).cuda()
+            del test
+            torch.cuda.empty_cache()
+
             device = torch.device('cuda')
-            print("GPU available – using CUDA.")
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"GPU detected: {gpu_name}")
+            print(f"CUDA version: {torch.version.cuda}")
+            print(f"VRAM available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
+            # cuDNN benchmark mode: profiles convolution algorithms once on the
+            # first forward pass then reuses the fastest one for every subsequent
+            # pass. Significant speedup for fixed input sizes.
+            torch.backends.cudnn.benchmark = True
+
             return device
         except Exception as e:
-            print(f"CUDA error ({e}), falling back to CPU.")
+            print(f"CUDA error during validation ({e}), falling back to CPU.")
+
     print("No GPU found. Using CPU.")
     return torch.device('cpu')
 
@@ -148,15 +168,21 @@ def get_device():
 # ---------------------------------------------------------------------------
 
 def main():
+    # Seed everything for reproducibility — torch.cuda.manual_seed is required
+    # in addition to torch.manual_seed for full GPU reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
 
     device = get_device()
-    print(f"Device: {device}\n")
+
+    if device.type == 'cuda':
+        torch.cuda.manual_seed(42)
+
+    print(f"\nDevice: {device}\n")
 
     # Hyperparameters
     data_dir   = 'topomaps'
-    batch_size = 8
+    batch_size = 32 if device.type == 'cuda' else 8   # larger batches fully utilise GPU parallelism
     num_epochs = 60
     lr         = 0.001
 
@@ -188,16 +214,41 @@ def main():
 
     print(f"Split – train: {len(train_paths)}  val: {len(val_paths)}  test: {len(test_paths)}\n")
 
-    # Datasets and loaders
+    # Datasets
     train_dataset = BrainDataset(train_paths, train_labels, train_transform)
     val_dataset   = BrainDataset(val_paths,   val_labels,   eval_transform)
     test_dataset  = BrainDataset(test_paths,  test_labels,  eval_transform)
 
-    num_workers = 2 if device.type == 'cuda' else 0
+    using_gpu = device.type == 'cuda'
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=num_workers)
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-    test_loader  = DataLoader(test_dataset,  batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    # pin_memory=True: allocates CPU tensors in page-locked memory so the
+    # CUDA DMA engine can transfer them to the GPU without an extra CPU copy.
+    # persistent_workers=True: keeps worker processes alive between epochs,
+    # avoiding the overhead of respawning them every epoch.
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4 if using_gpu else 0,
+        pin_memory=using_gpu,
+        persistent_workers=using_gpu,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4 if using_gpu else 0,
+        pin_memory=using_gpu,
+        persistent_workers=using_gpu,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4 if using_gpu else 0,
+        pin_memory=using_gpu,
+        persistent_workers=using_gpu,
+    )
 
     # Model, loss, optimiser, scheduler
     model     = BrainModel().to(device)
@@ -216,8 +267,9 @@ def main():
         train_loss = 0.0
 
         for imgs, targets in train_loader:
-            imgs    = imgs.to(device)
-            targets = targets.unsqueeze(1).to(device)
+            # non_blocking=True lets the CPU overlap data transfer with GPU work
+            imgs    = imgs.to(device, non_blocking=True)
+            targets = targets.unsqueeze(1).to(device, non_blocking=True)
 
             optimizer.zero_grad()
             outputs = model(imgs)
@@ -237,8 +289,8 @@ def main():
 
         with torch.no_grad():
             for imgs, targets in val_loader:
-                imgs    = imgs.to(device)
-                targets = targets.unsqueeze(1).to(device)
+                imgs    = imgs.to(device, non_blocking=True)
+                targets = targets.unsqueeze(1).to(device, non_blocking=True)
 
                 outputs   = model(imgs)
                 val_loss += criterion(outputs, targets).item() * imgs.size(0)
@@ -275,8 +327,8 @@ def main():
 
     with torch.no_grad():
         for imgs, targets in test_loader:
-            imgs    = imgs.to(device)
-            targets = targets.unsqueeze(1).to(device)
+            imgs    = imgs.to(device, non_blocking=True)
+            targets = targets.unsqueeze(1).to(device, non_blocking=True)
             outputs = model(imgs)
             predicted = (outputs >= 0.5).float()
             total    += targets.size(0)
