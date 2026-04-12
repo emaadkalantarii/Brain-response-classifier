@@ -1,345 +1,342 @@
 import os
-import numpy as np
 import torch
+import numpy as np
+import pandas as pd
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-from PIL import Image
-from sklearn.model_selection import train_test_split
 
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+BASE_DATA_DIR = "./signatures"
+MODEL_SAVE_PATH = "model.pth"
+
+LABELS_MAP = {"human": 0, "gan": 1, "sdt": 2, "vae": 3}
+CLASS_NAMES = {v: k for k, v in LABELS_MAP.items()}
+
+# Sequence & model hyperparameters
+MAX_SEQ_LENGTH = 150   # Best found after tuning (see README for details)
+INPUT_FEATURES = 2     # X and Y coordinates
+HIDDEN_SIZE = 128      # GRU hidden units per direction
+NUM_RNN_LAYERS = 2     # Number of stacked GRU layers
+NUM_CLASSES = 4
+DROPOUT_PROB = 0.25
+
+# Training hyperparameters
+BATCH_SIZE = 32
+NUM_EPOCHS = 60
+LEARNING_RATE = 0.001
+WEIGHT_DECAY = 1e-4
+GRADIENT_CLIP_VALUE = 1.0
+
+# Data split ratios: 70% train / 15% val / 15% test
+TRAIN_RATIO = 0.70
+VALIDATION_RATIO = 0.15
+
+NUM_DATALOADER_WORKERS = 2  # Used when CUDA is available
+RANDOM_STATE = 42
 
 # ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
 
-class BrainDataset(Dataset):
-    """PyTorch Dataset for brain topomap images with binary class labels."""
+class SignatureDataset(Dataset):
+    """
+    PyTorch Dataset for loading and preprocessing signature CSV files.
 
-    def __init__(self, img_paths, labels, transform=None):
-        self.img_paths = img_paths
+    Each CSV file contains space-separated X and Y coordinate columns.
+    Sequences are normalized per-signature with Min-Max scaling, then
+    padded with zeros or truncated to MAX_SEQ_LENGTH.
+    """
+
+    def __init__(self, file_paths: list, labels: list, max_seq_len: int, input_features: int):
+        self.file_paths = file_paths
         self.labels = labels
-        self.transform = transform
+        self.max_seq_len = max_seq_len
+        self.input_features = input_features
 
-    def __len__(self):
-        return len(self.img_paths)
+    def __len__(self) -> int:
+        return len(self.file_paths)
 
-    def __getitem__(self, idx):
-        img = Image.open(self.img_paths[idx]).convert('RGB')
-        label = torch.tensor(self.labels[idx], dtype=torch.float32)
-        if self.transform:
-            img = self.transform(img)
-        return img, label
+    def __getitem__(self, idx: int):
+        sequence = self._load_and_preprocess(self.file_paths[idx])
+        label = self.labels[idx]
+        return torch.tensor(sequence, dtype=torch.float32), torch.tensor(label, dtype=torch.long)
+
+    def _load_and_preprocess(self, csv_path: str) -> np.ndarray:
+        """Load a CSV file, normalize coordinates, and pad/truncate to fixed length."""
+        result = np.zeros((self.max_seq_len, self.input_features), dtype=np.float32)
+        try:
+            df = pd.read_csv(csv_path, sep=" ", header=0, names=["X", "Y"], engine="python")
+            df["X"] = pd.to_numeric(df["X"], errors="coerce")
+            df["Y"] = pd.to_numeric(df["Y"], errors="coerce")
+            df.dropna(inplace=True)
+
+            if df.empty:
+                return result
+
+            coords = df[["X", "Y"]].values.astype(np.float32)
+
+            if coords.shape[0] > 1:
+                coords[:, 0] = MinMaxScaler().fit_transform(coords[:, [0]]).flatten()
+                coords[:, 1] = MinMaxScaler().fit_transform(coords[:, [1]]).flatten()
+            else:
+                # Single-point sequences are uninformative; zero them out
+                coords[:, :] = 0.0
+
+            copy_len = min(len(coords), self.max_seq_len)
+            result[:copy_len, :] = coords[:copy_len, :]
+
+        except Exception as e:
+            print(f"Warning: Could not load '{csv_path}': {e}. Using zero sequence.")
+
+        return result
 
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_data(data_dir):
+def load_data(data_dir: str, labels_map: dict) -> tuple:
     """
-    Loads image paths and binary labels from the dataset directory.
+    Scan subdirectories for CSV files and collect file paths with integer labels.
 
-    Expected structure:
-        data_dir/
-          good/  ->  label 1
-          bad/   ->  label 0
+    Returns:
+        file_paths: list of absolute paths to CSV files
+        labels: list of corresponding integer class labels
     """
-    img_paths = []
-    labels = []
+    file_paths, labels = [], []
+    print(f"Loading data from: {data_dir}")
 
-    good_dir = os.path.join(data_dir, 'good')
-    for fname in os.listdir(good_dir):
-        if fname.lower().endswith('.png'):
-            img_paths.append(os.path.join(good_dir, fname))
-            labels.append(1)  # good = 1
+    for class_name, label_idx in labels_map.items():
+        class_dir = os.path.join(data_dir, class_name)
+        if not os.path.isdir(class_dir):
+            print(f"  Warning: Directory not found for class '{class_name}': {class_dir}")
+            continue
+        class_files = [
+            os.path.join(class_dir, f)
+            for f in os.listdir(class_dir)
+            if f.endswith(".csv")
+        ]
+        file_paths.extend(class_files)
+        labels.extend([label_idx] * len(class_files))
 
-    bad_dir = os.path.join(data_dir, 'bad')
-    for fname in os.listdir(bad_dir):
-        if fname.lower().endswith('.png'):
-            img_paths.append(os.path.join(bad_dir, fname))
-            labels.append(0)  # bad = 0
+    if not file_paths:
+        raise FileNotFoundError(f"No .csv files found in subdirectories of '{data_dir}'.")
 
-    print(f"Total images : {len(img_paths)}")
-    print(f"  Good (1)   : {labels.count(1)}")
-    print(f"  Bad  (0)   : {labels.count(0)}")
-    return img_paths, labels
+    print(f"Total files found: {len(file_paths)}")
+    for label_idx, class_name in CLASS_NAMES.items():
+        print(f"  Class '{class_name}' (label {label_idx}): {labels.count(label_idx)} files")
+
+    return file_paths, labels
 
 
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
-class BrainModel(nn.Module):
+class SignatureModel(nn.Module):
     """
-    CNN binary classifier for brain topomap images.
-    Output is a single value in [0, 1] via Sigmoid; threshold 0.5 gives the
-    predicted class (0 = bad, 1 = good).
+    Bidirectional 2-layer GRU classifier for signature sequences.
+
+    Architecture:
+        - BiGRU: 2 stacked layers, hidden_size units per direction
+        - Dropout before the classification head
+        - Linear head mapping to num_classes
     """
 
-    def __init__(self):
-        super(BrainModel, self).__init__()
+    def __init__(self, input_size: int, hidden_size: int, num_rnn_layers: int,
+                 num_classes: int, dropout_prob: float):
+        super().__init__()
+        self.rnn = nn.GRU(
+            input_size,
+            hidden_size,
+            num_layers=num_rnn_layers,
+            batch_first=True,
+            dropout=dropout_prob if num_rnn_layers > 1 else 0.0,
+            bidirectional=True,
+        )
+        self.dropout = nn.Dropout(dropout_prob)
+        self.classifier = nn.Linear(hidden_size * 2, num_classes)
 
-        # Convolutional blocks
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
-        self.relu1 = nn.ReLU()
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-        self.relu2 = nn.ReLU()
-        self.pool1 = nn.MaxPool2d(2)
-
-        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.relu3 = nn.ReLU()
-        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.relu4 = nn.ReLU()
-        self.pool2 = nn.MaxPool2d(2)
-
-        self.conv5 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.relu5 = nn.ReLU()
-        self.pool3 = nn.MaxPool2d(2)
-
-        self.conv6 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.relu6 = nn.ReLU()
-        self.pool4 = nn.MaxPool2d(2)
-
-        # Adaptive pooling to handle varying input sizes
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
-
-        # Fully connected classifier
-        self.fc1 = nn.Linear(512 * 4 * 4, 1024)
-        self.relu7 = nn.ReLU()
-        self.dropout1 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(1024, 1024)
-        self.relu8 = nn.ReLU()
-        self.dropout2 = nn.Dropout(0.5)
-        self.fc3 = nn.Linear(1024, 1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        x = self.pool1(self.relu2(self.conv2(self.relu1(self.conv1(x)))))   # block 1
-        x = self.pool2(self.relu4(self.conv4(self.relu3(self.conv3(x)))))   # block 2
-        x = self.pool3(self.relu5(self.conv5(x)))                           # block 3
-        x = self.pool4(self.relu6(self.conv6(x)))                           # block 4
-        x = self.adaptive_pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.dropout1(self.relu7(self.fc1(x)))
-        x = self.dropout2(self.relu8(self.fc2(x)))
-        x = self.sigmoid(self.fc3(x))
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # h_n shape: (num_layers * 2, batch, hidden_size)
+        _, h_n = self.rnn(x)
+        # Concatenate last forward and last backward hidden states
+        h_forward = h_n[-2]   # shape: (batch, hidden_size)
+        h_backward = h_n[-1]  # shape: (batch, hidden_size)
+        out = torch.cat((h_forward, h_backward), dim=1)
+        out = self.dropout(out)
+        return self.classifier(out)
 
 
 # ---------------------------------------------------------------------------
 # Device selection
 # ---------------------------------------------------------------------------
 
-def get_device():
-    """
-    Returns a CUDA device if a working NVIDIA GPU is available, otherwise CPU.
-    Validates CUDA by running a test tensor operation — torch.device('cuda')
-    alone never raises, so a real operation is needed to confirm the GPU works.
-    """
+def get_device() -> torch.device:
+    """Return a CUDA device if available, otherwise CPU."""
     if torch.cuda.is_available():
-        try:
-            # Validate with an actual GPU operation, not just device object creation
-            test = torch.zeros(1).cuda()
-            del test
-            torch.cuda.empty_cache()
-
-            device = torch.device('cuda')
-            gpu_name = torch.cuda.get_device_name(0)
-            print(f"GPU detected: {gpu_name}")
-            print(f"CUDA version: {torch.version.cuda}")
-            print(f"VRAM available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-
-            # cuDNN benchmark mode: profiles convolution algorithms once on the
-            # first forward pass then reuses the fastest one for every subsequent
-            # pass. Significant speedup for fixed input sizes.
-            torch.backends.cudnn.benchmark = True
-
-            return device
-        except Exception as e:
-            print(f"CUDA error during validation ({e}), falling back to CPU.")
-
-    print("No GPU found. Using CPU.")
-    return torch.device('cpu')
+        device = torch.device("cuda")
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(f"CUDA GPU detected: {gpu_name} ({gpu_mem:.1f} GB) — using GPU.")
+        return device
+    print("No CUDA GPU found — using CPU.")
+    return torch.device("cpu")
 
 
 # ---------------------------------------------------------------------------
-# Training
+# Checkpoint utilities
+# ---------------------------------------------------------------------------
+
+def load_checkpoint(path: str, device: torch.device) -> dict:
+    """Load a model state dict from a .pth file, with compatibility fallback."""
+    try:
+        return torch.load(path, map_location=device, weights_only=True)
+    except (TypeError, RuntimeError):
+        print("Note: 'weights_only=True' not supported on this PyTorch version; falling back.")
+        return torch.load(path, map_location=device)
+
+
+# ---------------------------------------------------------------------------
+# Training & evaluation helpers
+# ---------------------------------------------------------------------------
+
+def train_one_epoch(model, loader, criterion, optimizer, device) -> float:
+    """Run one training epoch and return the average loss."""
+    model.train()
+    total_loss = 0.0
+    for inputs, labels in loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_VALUE)
+        optimizer.step()
+        total_loss += loss.item() * inputs.size(0)
+    return total_loss / len(loader.dataset)
+
+
+def evaluate(model, loader, criterion, device) -> tuple:
+    """Evaluate the model and return (average_loss, accuracy_percent)."""
+    model.eval()
+    total_loss, correct, total = 0.0, 0, 0
+    with torch.no_grad():
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            total_loss += criterion(outputs, labels).item() * inputs.size(0)
+            predicted = outputs.argmax(dim=1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+    avg_loss = total_loss / len(loader.dataset) if loader.dataset else 0.0
+    accuracy = 100.0 * correct / total if total > 0 else 0.0
+    return avg_loss, accuracy
+
+
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 
 def main():
-    # Seed everything for reproducibility — torch.cuda.manual_seed is required
-    # in addition to torch.manual_seed for full GPU reproducibility
-    torch.manual_seed(42)
-    np.random.seed(42)
+    torch.manual_seed(RANDOM_STATE)
+    np.random.seed(RANDOM_STATE)
 
     device = get_device()
+    print(f"Using device: {device}\n")
 
-    if device.type == 'cuda':
-        torch.cuda.manual_seed(42)
-
-    print(f"\nDevice: {device}\n")
-
-    # Hyperparameters
-    data_dir   = 'topomaps'
-    batch_size = 32 if device.type == 'cuda' else 8   # larger batches fully utilise GPU parallelism
-    num_epochs = 60
-    lr         = 0.001
-
-    # Separate transforms: augmentation only during training
-    train_transform = transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ])
-
-    eval_transform = transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ])
-
-    # Load and split: 70% train / 15% val / 15% test (stratified to preserve class balance)
-    all_paths, all_labels = load_data(data_dir)
+    # --- Data loading & splitting ---
+    file_paths, labels = load_data(BASE_DATA_DIR, LABELS_MAP)
 
     train_paths, temp_paths, train_labels, temp_labels = train_test_split(
-        all_paths, all_labels, test_size=0.3, random_state=42, stratify=all_labels
+        file_paths, labels,
+        train_size=TRAIN_RATIO,
+        random_state=RANDOM_STATE,
+        stratify=labels,
     )
+    relative_val_size = VALIDATION_RATIO / (1.0 - TRAIN_RATIO)
     val_paths, test_paths, val_labels, test_labels = train_test_split(
-        temp_paths, temp_labels, test_size=0.5, random_state=42, stratify=temp_labels
+        temp_paths, temp_labels,
+        train_size=relative_val_size,
+        random_state=RANDOM_STATE,
+        stratify=temp_labels,
     )
 
-    print(f"Split – train: {len(train_paths)}  val: {len(val_paths)}  test: {len(test_paths)}\n")
+    print(f"\nSplit sizes — Train: {len(train_paths)} | Val: {len(val_paths)} | Test: {len(test_paths)}\n")
 
-    # Datasets
-    train_dataset = BrainDataset(train_paths, train_labels, train_transform)
-    val_dataset   = BrainDataset(val_paths,   val_labels,   eval_transform)
-    test_dataset  = BrainDataset(test_paths,  test_labels,  eval_transform)
+    # --- DataLoaders ---
+    workers = NUM_DATALOADER_WORKERS if device.type == "cuda" else 0
+    pin = device.type == "cuda"
 
-    using_gpu = device.type == 'cuda'
+    def make_loader(paths, lbls, shuffle):
+        ds = SignatureDataset(paths, lbls, MAX_SEQ_LENGTH, INPUT_FEATURES)
+        return DataLoader(ds, batch_size=BATCH_SIZE, shuffle=shuffle,
+                          num_workers=workers, pin_memory=pin)
 
-    # pin_memory=True: allocates CPU tensors in page-locked memory so the
-    # CUDA DMA engine can transfer them to the GPU without an extra CPU copy.
-    # persistent_workers=True: keeps worker processes alive between epochs,
-    # avoiding the overhead of respawning them every epoch.
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4 if using_gpu else 0,
-        pin_memory=using_gpu,
-        persistent_workers=using_gpu,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4 if using_gpu else 0,
-        pin_memory=using_gpu,
-        persistent_workers=using_gpu,
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4 if using_gpu else 0,
-        pin_memory=using_gpu,
-        persistent_workers=using_gpu,
-    )
+    train_loader = make_loader(train_paths, train_labels, shuffle=True)
+    val_loader = make_loader(val_paths, val_labels, shuffle=False)
+    test_loader = make_loader(test_paths, test_labels, shuffle=False)
 
-    # Model, loss, optimiser, scheduler
-    model     = BrainModel().to(device)
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    # --- Model, loss, optimizer, scheduler ---
+    model = SignatureModel(INPUT_FEATURES, HIDDEN_SIZE, NUM_RNN_LAYERS, NUM_CLASSES, DROPOUT_PROB).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=7)
 
-    best_val_loss = float('inf')
+    # --- Training loop with early stopping ---
+    best_val_loss = float("inf")
+    epochs_no_improve = 0
+    early_stopping_patience = 15
 
-    print("Starting training...\n")
+    for epoch in range(1, NUM_EPOCHS + 1):
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        val_loss, val_acc = evaluate(model, val_loader, criterion, device)
 
-    for epoch in range(1, num_epochs + 1):
-
-        # Training
-        model.train()
-        train_loss = 0.0
-
-        for imgs, targets in train_loader:
-            # non_blocking=True lets the CPU overlap data transfer with GPU work
-            imgs    = imgs.to(device, non_blocking=True)
-            targets = targets.unsqueeze(1).to(device, non_blocking=True)
-
-            optimizer.zero_grad()
-            outputs = model(imgs)
-            loss    = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item() * imgs.size(0)
-
-        train_loss /= len(train_loader.dataset)
-
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        correct  = 0
-        total    = 0
-
-        with torch.no_grad():
-            for imgs, targets in val_loader:
-                imgs    = imgs.to(device, non_blocking=True)
-                targets = targets.unsqueeze(1).to(device, non_blocking=True)
-
-                outputs   = model(imgs)
-                val_loss += criterion(outputs, targets).item() * imgs.size(0)
-
-                predicted  = (outputs >= 0.5).float()
-                total     += targets.size(0)
-                correct   += (predicted == targets).sum().item()
-
-        val_loss /= len(val_loader.dataset)
-        val_acc   = correct / total
-
+        prev_lr = optimizer.param_groups[0]["lr"]
         scheduler.step(val_loss)
-        curr_lr = optimizer.param_groups[0]['lr']
+        curr_lr = optimizer.param_groups[0]["lr"]
+        if curr_lr < prev_lr:
+            print(f"  → Learning rate reduced: {prev_lr:.6f} → {curr_lr:.6f}")
 
         print(
-            f"Epoch {epoch:3d}/{num_epochs} | "
+            f"Epoch {epoch:>3}/{NUM_EPOCHS} | "
             f"Train Loss: {train_loss:.4f} | "
             f"Val Loss: {val_loss:.4f} | "
-            f"Val Acc: {val_acc:.4f} | "
+            f"Val Acc: {val_acc:.2f}% | "
             f"LR: {curr_lr:.6f}"
         )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), 'model.pth')
-            print("  → Saved new best model.")
-
-    # Final evaluation on the held-out test set using the best checkpoint
-    print("\nEvaluating best model on held-out test set...")
-    model.load_state_dict(torch.load('model.pth', weights_only=True, map_location=device))
-    model.eval()
-    correct = 0
-    total   = 0
-
-    with torch.no_grad():
-        for imgs, targets in test_loader:
-            imgs    = imgs.to(device, non_blocking=True)
-            targets = targets.unsqueeze(1).to(device, non_blocking=True)
-            outputs = model(imgs)
-            predicted = (outputs >= 0.5).float()
-            total    += targets.size(0)
-            correct  += (predicted == targets).sum().item()
-
-    print(f"Test Accuracy: {correct / total:.4f}")
-
-    if device.type == 'cuda':
-        torch.cuda.empty_cache()
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+            print(f"  ✓ Saved best model (Val Loss: {best_val_loss:.4f})")
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= early_stopping_patience:
+                print(f"\nEarly stopping: no improvement for {early_stopping_patience} consecutive epochs.")
+                break
 
     print("\nTraining complete.")
+
+    # --- Final evaluation on test set ---
+    try:
+        model.load_state_dict(load_checkpoint(MODEL_SAVE_PATH, device))
+    except FileNotFoundError:
+        print(f"Error: Model checkpoint '{MODEL_SAVE_PATH}' not found. Cannot evaluate.")
+        return
+
+    test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+    print(f"\nTest Set Results — Loss: {test_loss:.4f} | Accuracy: {test_acc:.2f}%")
+
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
