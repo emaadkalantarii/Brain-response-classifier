@@ -1,4 +1,9 @@
 # Third-party libraries required beyond the default grading environment.
 # Install with: pip install -r requirements.txt
 
-torchvision>=0.19.0
+torch==2.4.0 
+torchvision==0.19.0
+scikit-learn 
+pillow 
+numpy
+
