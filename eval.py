@@ -152,7 +152,7 @@ def load_and_predict(directory, model_file):
     for subfolder in ('good', 'bad'):
         folder_path = os.path.join(directory, subfolder)
         if os.path.exists(folder_path):
-            for fname in os.listdir(folder_path):
+            for fname in sorted(os.listdir(folder_path)):
                 if fname.lower().endswith('.png'):
                     image_files.append(os.path.join(folder_path, fname))
 

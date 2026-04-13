@@ -49,13 +49,13 @@ def load_data(data_dir):
     labels = []
 
     good_dir = os.path.join(data_dir, 'good')
-    for fname in os.listdir(good_dir):
+    for fname in sorted(os.listdir(good_dir)):
         if fname.lower().endswith('.png'):
             img_paths.append(os.path.join(good_dir, fname))
             labels.append(1)  # good = 1
 
     bad_dir = os.path.join(data_dir, 'bad')
-    for fname in os.listdir(bad_dir):
+    for fname in sorted(os.listdir(bad_dir)):
         if fname.lower().endswith('.png'):
             img_paths.append(os.path.join(bad_dir, fname))
             labels.append(0)  # bad = 0
