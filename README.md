@@ -3,19 +3,24 @@
 ![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.4-EE4C2C?logo=pytorch&logoColor=white)
 ![Task](https://img.shields.io/badge/Task-Binary%20Classification-4CAF50)
+![Domain](https://img.shields.io/badge/Domain-EEG%20%2F%20BCI-8A2BE2)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
-A deep learning system that classifies brain responses to visual design stimuli as **good** or **bad** using EEG topomap images. The model is a custom Convolutional Neural Network (CNN) built in PyTorch, trained to distinguish between two neurological response patterns after 6 seconds of design exposure.
+A deep learning system that classifies brain responses to visual design stimuli as **good** or **bad** using EEG topographic map (topomap) images. The model is a custom Convolutional Neural Network (CNN) built from scratch in PyTorch, trained to distinguish between two neurological response patterns recorded after 6 seconds of design exposure.
 
 ---
 
 ## Overview
 
-Electroencephalography (EEG) topographic maps (topomaps) visualise the spatial distribution of brain electrical activity across the scalp at a given moment. This project applies computer vision to neuroscience: instead of a human expert interpreting the maps, a CNN learns to recognise the patterns that distinguish a positive brain response to a design from a negative one.
+Electroencephalography (EEG) topographic maps (topomaps) visualise the spatial distribution of brain electrical activity across the scalp at a given moment. Traditionally, interpreting these maps to assess whether a design evokes a positive or negative neurological response requires domain expertise and is time-consuming at scale.
+
+This project applies computer vision to that problem: instead of a human expert interpreting the maps, a CNN learns directly from topomap images to distinguish positive from negative brain responses to visual stimuli — enabling automated, scalable assessment for applications in UX research, design evaluation, and neuro-marketing.
 
 ```
 Input: EEG topomap image  →  CNN  →  Output: 0 (bad) or 1 (good)
 ```
+
+> **Note:** The dataset is not included in this repository. See the [Dataset](#dataset) section for the expected directory structure before running training.
 
 ---
 
@@ -59,16 +64,16 @@ Output: probability ∈ [0, 1]  →  threshold 0.5  →  class label {0, 1}
 ```
 
 **Design choices:**
-- Progressive filter doubling (16 → 512) extracts features from low-level edges up to high-level spatial patterns.
+- Progressive filter doubling (16 → 512) builds a feature hierarchy from low-level edges up to high-level spatial patterns.
 - `AdaptiveAvgPool2d` makes the model robust to small input size variations.
-- Dropout (p=0.5) on both FC layers reduces overfitting on the small dataset.
+- Dropout (p=0.5) on both FC layers is the primary regularisation mechanism, essential given the small dataset size.
 - Sigmoid + BCELoss is the standard setup for binary classification with a single output neuron.
 
 ---
 
 ## Dataset
 
-The dataset consists of EEG topomap images recorded after 6 seconds of exposure to visual design stimuli, split into two classes.
+The dataset consists of EEG topomap images recorded after 6 seconds of exposure to visual design stimuli, labelled by the class of neurological response.
 
 ```
 topomaps/
@@ -87,7 +92,9 @@ topomaps/
 | `bad` | `0` | 678 | Brain response to a poorly received design |
 | `good` | `1` | 500 | Brain response to a well received design |
 
+**Class imbalance:** The dataset is naturally imbalanced (678 bad vs. 500 good). All train/val/test splits are **stratified** to preserve this ratio across every partition, preventing any split from being accidentally skewed toward one class.
 
+> The dataset is **not included** in this repository. Place the `topomaps/` folder in the project root before running training or inference.
 
 ---
 
@@ -103,18 +110,17 @@ topomaps/
 | Epochs | 60 |
 | Input size | 128 × 128 |
 | Normalisation | ImageNet mean/std |
+| Checkpoint strategy | Save on best validation loss |
 
 ### Data Augmentation
 
-Augmentations are applied **only during training** to reduce overfitting:
+Augmentations are applied **only during training** to reduce overfitting. Validation and test sets use only resize and normalise — no augmentation.
 
 | Transform | Parameters |
 |-----------|------------|
 | RandomHorizontalFlip | p = 0.5 |
 | RandomRotation | ±10° |
 | ColorJitter | brightness ±20%, contrast ±20% |
-
-Validation and test sets use only resize and normalise — no augmentation.
 
 ### Data Split
 
@@ -133,10 +139,9 @@ Full dataset (1178 images)
 
 ```
 eeg-topomap-classifier/
-├── train.py          # Training script: data loading, model, training loop, test eval
+├── train.py          # Training script: data loading, model definition, training loop, test eval
 ├── eval.py           # Inference script: load checkpoint, predict labels for new images
-├── requirements.txt  # Additional dependencies (torchvision)
-├── .gitignore
+├── requirements.txt  # Python dependencies
 └── README.md
 ```
 
@@ -146,46 +151,46 @@ eeg-topomap-classifier/
 
 **Prerequisites:** Python 3.8+, [Miniconda](https://www.anaconda.com/download/success) (recommended)
 
-1. **Clone the repository:**
+**1. Clone the repository:**
 
-    ```bash
-    git clone https://github.com/emaadkalantarii/eeg-topomap-classifier.git
-    cd eeg-topomap-classifier
-    ```
+```bash
+git clone https://github.com/emaadkalantarii/Brain-response-classifier.git
+cd Brain-response-classifier
+```
 
-2. **Create the environment and install dependencies:**
+**2. Create the environment and install dependencies:**
 
-    **Option A — conda (recommended, especially on Windows):**
+**Option A — conda (recommended, especially on Windows):**
 
-    Conda resolves all native DLL dependencies automatically, avoiding common Windows issues with pip-installed PyTorch (e.g. `fbgemm.dll` errors).
+Conda resolves all native DLL dependencies automatically, avoiding common Windows issues with pip-installed PyTorch (e.g. `fbgemm.dll` errors).
 
-    ```bash
-    conda create -n brain-classifier python=3.11 -y
-    conda activate brain-classifier
-    conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=12.1 -c pytorch -c nvidia -y
-    pip install scikit-learn pillow numpy
-    ```
+```bash
+conda create -n brain-classifier python=3.11 -y
+conda activate brain-classifier
+conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=12.1 -c pytorch -c nvidia -y
+pip install scikit-learn pillow numpy
+```
 
-    **Option B — pip + venv (Linux / macOS):**
+**Option B — pip + venv (Linux / macOS):**
 
-    ```bash
-    python -m venv venv-topo
-    source venv-topo/bin/activate
-    pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
-    pip install scikit-learn pillow numpy
-    ```
+```bash
+python -m venv venv-topo
+source venv-topo/bin/activate
+pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
+pip install scikit-learn pillow numpy
+```
 
-3. **Verify GPU is detected (optional but recommended):**
+**3. Verify GPU is detected (optional but recommended):**
 
-    ```bash
-    python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
-    ```
+```bash
+python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+```
 
-    Expected output:
-    ```
-    True
-    NVIDIA GeForce RTX 4060 Laptop GPU
-    ```
+Expected output:
+```
+True
+NVIDIA GeForce RTX 4060 Laptop GPU
+```
 
 ---
 
@@ -222,7 +227,7 @@ Evaluating best model on held-out test set...
 Test Accuracy: 0.9096
 ```
 
-The best checkpoint (lowest validation loss) is saved as `model.pth`. After training completes, the script automatically loads the best checkpoint and reports accuracy on the held-out test set.
+The best checkpoint (lowest validation loss) is saved as `model.pth`. After training completes, the script automatically loads the best checkpoint and evaluates it on the held-out test set.
 
 ### Inference
 
@@ -240,7 +245,7 @@ results = load_and_predict("path/to/images", "model.pth")
 # }
 ```
 
-Or run the built-in self-test against the `topomaps/` folder:
+Or run the built-in self-test directly:
 
 ```bash
 python eval.py
@@ -254,6 +259,8 @@ Total predictions : 1178
 Accuracy          : 0.9499
 ```
 
+> **Note:** The self-test runs inference over all 1,178 images including those seen during training, which is why the reported accuracy (94.99%) is higher than the held-out test set accuracy (90.96%). The test set figure is the correct measure of generalisation.
+
 ---
 
 ## Dependencies
@@ -264,7 +271,7 @@ Accuracy          : 0.9499
 | torchvision | ≥ 0.19.0 | Image transforms |
 | Pillow | 11.0.0 | Image loading |
 | NumPy | 2.2.0 | Numerical utilities |
-| scikit-learn | 1.6 | Stratified train/test split |
+| scikit-learn | 1.6 | Stratified train/val/test split |
 
 ---
 
