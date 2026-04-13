@@ -95,7 +95,7 @@ topomaps/
 | Learning rate | 0.001 |
 | LR scheduler | ReduceLROnPlateau (factor 0.5, patience 5) |
 | Loss function | BCELoss |
-| Batch size | 8 |
+| Batch size | 32 (GPU) / 8 (CPU) — set automatically |
 | Epochs | 60 |
 | Input size | 128 × 128 |
 | Normalisation | ImageNet mean/std |
@@ -140,7 +140,7 @@ eeg-topomap-classifier/
 
 ## Setup
 
-**Prerequisites:** Python 3.8+
+**Prerequisites:** Python 3.8+, [Miniconda](https://www.anaconda.com/download/success) (recommended)
 
 1. **Clone the repository:**
 
@@ -149,20 +149,38 @@ eeg-topomap-classifier/
     cd eeg-topomap-classifier
     ```
 
-2. **Create and activate a virtual environment:**
+2. **Create the environment and install dependencies:**
+
+    **Option A — conda (recommended, especially on Windows):**
+
+    Conda resolves all native DLL dependencies automatically, avoiding common Windows issues with pip-installed PyTorch (e.g. `fbgemm.dll` errors).
+
+    ```bash
+    conda create -n brain-classifier python=3.11 -y
+    conda activate brain-classifier
+    conda install pytorch==2.4.0 torchvision==0.19.0 pytorch-cuda=12.1 -c pytorch -c nvidia -y
+    pip install scikit-learn pillow numpy
+    ```
+
+    **Option B — pip + venv (Linux / macOS):**
 
     ```bash
     python -m venv venv-topo
-    source venv-topo/bin/activate      # macOS/Linux
-    venv-topo\Scripts\activate         # Windows
+    source venv-topo/bin/activate
+    pip install torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu121
+    pip install scikit-learn pillow numpy
     ```
 
-3. **Install dependencies:**
+3. **Verify GPU is detected (optional but recommended):**
 
     ```bash
-    pip install torch==2.4.0 torchvision numpy pillow scikit-learn
-    # or
-    pip install -r requirements.txt
+    python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+    ```
+
+    Expected output:
+    ```
+    True
+    NVIDIA GeForce RTX 4060 Laptop GPU
     ```
 
 ---
@@ -175,6 +193,16 @@ Place the `topomaps/` dataset in the project root, then run:
 
 ```bash
 python train.py
+```
+
+The script automatically detects and uses your GPU if available. Expected startup output:
+
+```
+GPU detected: NVIDIA GeForce RTX 4060 Laptop GPU
+CUDA version: 12.1
+VRAM available: 8.2 GB
+
+Device: cuda
 ```
 
 Training output per epoch:
@@ -211,9 +239,10 @@ python eval.py
 ```
 
 ```
+GPU detected: NVIDIA GeForce RTX 4060 Laptop GPU
 Model loaded successfully.
-Found 80 images.
-Total predictions : 80
+Found 1178 images.
+Total predictions : 1178
 Accuracy          : 0.8250
 ```
 
