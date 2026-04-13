@@ -87,7 +87,7 @@ topomaps/
 | `bad` | `0` | 678 | Brain response to a poorly received design |
 | `good` | `1` | 500 | Brain response to a well received design |
 
-> The dataset is not included in this repository. Place the `topomaps/` folder in the project root before running training.
+
 
 ---
 
