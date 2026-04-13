@@ -1,247 +1,218 @@
 import os
-import glob
 import torch
 import torch.nn as nn
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+from torchvision import transforms
+from PIL import Image
+
 
 # ---------------------------------------------------------------------------
-# Configuration — must match train.py exactly
+# Model definition  (must be identical to the one in train.py)
 # ---------------------------------------------------------------------------
 
-MAX_SEQ_LENGTH = 150
-INPUT_FEATURES = 2
-HIDDEN_SIZE = 128
-NUM_RNN_LAYERS = 2
-NUM_CLASSES = 4
-DROPOUT_PROB = 0.25
-
-CLASS_SUBDIRECTORIES_MAP = {"human": 0, "gan": 1, "sdt": 2, "vae": 3}
-
-# ---------------------------------------------------------------------------
-# Model — must be identical to the definition used in train.py
-# ---------------------------------------------------------------------------
-
-class SignatureModel(nn.Module):
+class BrainModel(nn.Module):
     """
-    Bidirectional 2-layer GRU classifier for signature sequences.
-
-    Architecture:
-        - BiGRU: 2 stacked layers, hidden_size units per direction
-        - Dropout before the classification head
-        - Linear head mapping to num_classes
+    CNN binary classifier for brain topomap images.
+    Output is a single value in [0, 1] via Sigmoid; threshold 0.5 gives the
+    predicted class (0 = bad, 1 = good).
     """
 
-    def __init__(self, input_size: int, hidden_size: int, num_rnn_layers: int,
-                 num_classes: int, dropout_prob: float):
-        super().__init__()
-        self.rnn = nn.GRU(
-            input_size,
-            hidden_size,
-            num_layers=num_rnn_layers,
-            batch_first=True,
-            dropout=dropout_prob if num_rnn_layers > 1 else 0.0,
-            bidirectional=True,
-        )
-        self.dropout = nn.Dropout(dropout_prob)
-        self.classifier = nn.Linear(hidden_size * 2, num_classes)
+    def __init__(self):
+        super(BrainModel, self).__init__()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _, h_n = self.rnn(x)
-        h_forward = h_n[-2]
-        h_backward = h_n[-1]
-        out = torch.cat((h_forward, h_backward), dim=1)
-        out = self.dropout(out)
-        return self.classifier(out)
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, padding=1)
+        self.relu1 = nn.ReLU()
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.relu2 = nn.ReLU()
+        self.pool1 = nn.MaxPool2d(2)
+
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.relu3 = nn.ReLU()
+        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.relu4 = nn.ReLU()
+        self.pool2 = nn.MaxPool2d(2)
+
+        self.conv5 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        self.relu5 = nn.ReLU()
+        self.pool3 = nn.MaxPool2d(2)
+
+        self.conv6 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
+        self.relu6 = nn.ReLU()
+        self.pool4 = nn.MaxPool2d(2)
+
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
+
+        self.fc1 = nn.Linear(512 * 4 * 4, 1024)
+        self.relu7 = nn.ReLU()
+        self.dropout1 = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(1024, 1024)
+        self.relu8 = nn.ReLU()
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc3 = nn.Linear(1024, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.pool1(self.relu2(self.conv2(self.relu1(self.conv1(x)))))   # block 1
+        x = self.pool2(self.relu4(self.conv4(self.relu3(self.conv3(x)))))   # block 2
+        x = self.pool3(self.relu5(self.conv5(x)))                           # block 3
+        x = self.pool4(self.relu6(self.conv6(x)))                           # block 4
+        x = self.adaptive_pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.dropout1(self.relu7(self.fc1(x)))
+        x = self.dropout2(self.relu8(self.fc2(x)))
+        x = self.sigmoid(self.fc3(x))
+        return x
 
 
 # ---------------------------------------------------------------------------
-# Device selection
+# Helpers
 # ---------------------------------------------------------------------------
 
-def get_device() -> torch.device:
-    """Return a CUDA device if available, otherwise CPU."""
+def get_device():
+    """
+    Returns a CUDA device if a working NVIDIA GPU is available, otherwise CPU.
+    Validates CUDA by running a test tensor operation — torch.device('cuda')
+    alone never raises, so a real operation is needed to confirm the GPU works.
+    """
     if torch.cuda.is_available():
-        print("CUDA GPU detected — using GPU for inference.")
-        return torch.device("cuda")
-    print("No GPU found — using CPU.")
-    return torch.device("cpu")
+        try:
+            # Validate with an actual GPU operation, not just device object creation
+            test = torch.zeros(1).cuda()
+            del test
+            torch.cuda.empty_cache()
+
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"GPU detected: {gpu_name}")
+            return torch.device('cuda')
+        except Exception as e:
+            print(f"CUDA error during validation ({e}), falling back to CPU.")
+
+    print("No GPU found. Using CPU.")
+    return torch.device('cpu')
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint utility
+# Public API  (called by the graders)
 # ---------------------------------------------------------------------------
 
-def load_checkpoint(path: str, device: torch.device) -> dict:
-    """Load a model state dict from a .pth file, with compatibility fallback."""
-    try:
-        return torch.load(path, map_location=device, weights_only=True)
-    except (TypeError, RuntimeError):
-        print("Note: 'weights_only=True' not supported on this PyTorch version; falling back.")
-        return torch.load(path, map_location=device)
-
-
-# ---------------------------------------------------------------------------
-# Preprocessing
-# ---------------------------------------------------------------------------
-
-def preprocess_signature(csv_path: str, max_seq_len: int, input_features: int) -> torch.Tensor:
+def load_and_predict(directory, model_file):
     """
-    Load a single signature CSV and return a preprocessed tensor.
+    Loads a trained model and predicts class labels for brain response images.
 
-    Steps:
-        1. Read space-separated X, Y columns.
-        2. Drop rows with non-numeric values.
-        3. Normalize each axis independently with Min-Max scaling.
-        4. Pad with zeros or truncate to max_seq_len.
+    The directory argument is a folder with the same structure as the dataset:
 
-    Returns:
-        Tensor of shape (max_seq_len, input_features).
-    """
-    result = np.zeros((max_seq_len, input_features), dtype=np.float32)
-    try:
-        df = pd.read_csv(csv_path, sep=" ", header=0, names=["X", "Y"], engine="python")
-        df["X"] = pd.to_numeric(df["X"], errors="coerce")
-        df["Y"] = pd.to_numeric(df["Y"], errors="coerce")
-        df.dropna(inplace=True)
+        /path/to/some/images
+          |_ good
+             |_ Good_6s_1.png
+             |_ Good_6s_2.png
+             |_ ...
+          |_ bad
+             |_ Bad_6s_1.png
+             |_ Bad_6s_2.png
+             |_ ...
 
-        if df.empty:
-            return torch.tensor(result, dtype=torch.float32)
+    The model_file argument is a trained model checkpoint in .pth format.
 
-        coords = df[["X", "Y"]].values.astype(np.float32)
+    This function:
+    1. Reads all .png images from the good/ and bad/ sub-directories.
+    2. Applies the same preprocessing as during training.
+    3. Loads the model checkpoint.
+    4. Runs inference and converts probabilities to integer labels:
+       0 for "bad", 1 for "good".
+    5. Returns a dictionary mapping absolute file paths to predicted labels.
 
-        if coords.shape[0] > 1:
-            coords[:, 0] = MinMaxScaler().fit_transform(coords[:, [0]]).flatten()
-            coords[:, 1] = MinMaxScaler().fit_transform(coords[:, [1]]).flatten()
-        else:
-            coords[:, :] = 0.0
-
-        copy_len = min(len(coords), max_seq_len)
-        result[:copy_len, :] = coords[:copy_len, :]
-
-    except Exception as e:
-        print(f"Warning: Could not process '{os.path.basename(csv_path)}': {e}. Using zero sequence.")
-
-    return torch.tensor(result, dtype=torch.float32)
-
-
-# ---------------------------------------------------------------------------
-# Main evaluation function
-# ---------------------------------------------------------------------------
-
-def load_and_predict(directory: str, model_file: str) -> dict:
-    """
-    Run inference on all CSV files found in a directory tree.
-
-    The directory is expected to follow the same structure as the training dataset:
-        /path/to/signatures/
-            human/  001g01.csv  001g02.csv  ...
-            gan/    001g01.csv  001g02.csv  ...
-            sdt/    001g01.csv  001g02.csv  ...
-            vae/    001g01.csv  001g02.csv  ...
-
-    Args:
-        directory:  Root path to search for .csv files (searched recursively).
-        model_file: Path to a trained model checkpoint (.pth file).
-
-    Returns:
-        A dict mapping absolute CSV file paths to predicted integer labels:
-            { '/abs/path/to/human/001g01.csv': 0,
-              '/abs/path/to/gan/001g01.csv':   1, ... }
-
-        Label encoding: human → 0, gan → 1, sdt → 2, vae → 3
+    Returns
+    -------
+    dict
+        {'/path/to/images/good/Good_6s_1.png': 1,
+         '/path/to/images/bad/Bad_6s_1.png':  0, ...}
     """
     device = get_device()
 
-    # --- Load model ---
-    model = SignatureModel(INPUT_FEATURES, HIDDEN_SIZE, NUM_RNN_LAYERS, NUM_CLASSES, DROPOUT_PROB)
+    transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    # Load model
+    model = BrainModel()
     try:
-        state_dict = load_checkpoint(model_file, device)
+        state_dict = torch.load(model_file, map_location=device, weights_only=True)
         model.load_state_dict(state_dict)
-    except FileNotFoundError:
-        print(f"Error: Model file '{model_file}' not found.")
-        return {}
+        model = model.to(device)
+        print("Model loaded successfully.")
     except Exception as e:
-        print(f"Error loading model checkpoint '{model_file}': {e}")
+        print(f"Error loading model: {e}")
         return {}
 
-    model = model.to(device)
     model.eval()
 
-    # --- Collect CSV files ---
-    csv_files = sorted(set(
-        os.path.abspath(p)
-        for p in glob.glob(os.path.join(directory, "**", "*.csv"), recursive=True)
-    ))
+    # Collect image paths from both sub-directories
+    image_files = []
+    for subfolder in ('good', 'bad'):
+        folder_path = os.path.join(directory, subfolder)
+        if os.path.exists(folder_path):
+            for fname in os.listdir(folder_path):
+                if fname.lower().endswith('.png'):
+                    image_files.append(os.path.join(folder_path, fname))
 
-    if not csv_files:
-        print(f"Warning: No .csv files found in '{directory}' or its subdirectories.")
-        return {}
+    print(f"Found {len(image_files)} images.")
 
-    # --- Batch inference ---
-    EVAL_BATCH_SIZE = 32
     labels_dict = {}
+    batch_size  = 64 if device.type == 'cuda' else 4
+
+    using_gpu = device.type == 'cuda'
 
     with torch.no_grad():
-        for batch_start in range(0, len(csv_files), EVAL_BATCH_SIZE):
-            batch_paths = csv_files[batch_start: batch_start + EVAL_BATCH_SIZE]
+        for i in range(0, len(image_files), batch_size):
+            batch_paths   = image_files[i : i + batch_size]
+            batch_tensors = []
+            valid_paths   = []
 
-            tensors, valid_paths = [], []
-            for path in batch_paths:
+            for img_path in batch_paths:
                 try:
-                    tensors.append(preprocess_signature(path, MAX_SEQ_LENGTH, INPUT_FEATURES))
-                    valid_paths.append(path)
+                    img = Image.open(img_path).convert('RGB')
+                    batch_tensors.append(transform(img))
+                    valid_paths.append(img_path)
                 except Exception as e:
-                    print(f"Warning: Skipping '{os.path.basename(path)}': {e}")
+                    print(f"Error processing {img_path}: {e}")
 
-            if not tensors:
+            if not batch_tensors:
                 continue
 
-            batch_tensor = torch.stack(tensors).to(device)
-            logits = model(batch_tensor)
-            predictions = logits.argmax(dim=1)
+            # non_blocking=True overlaps CPU→GPU transfer with other GPU work
+            outputs = model(torch.stack(batch_tensors).to(device, non_blocking=using_gpu))
 
-            for path, label in zip(valid_paths, predictions.tolist()):
-                labels_dict[path] = label
+            for img_path, prob in zip(valid_paths, outputs.cpu().tolist()):
+                # prob is a list with one element because the model output shape is (batch, 1)
+                labels_dict[os.path.abspath(img_path)] = 1 if prob[0] >= 0.5 else 0
+
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     return labels_dict
 
 
 # ---------------------------------------------------------------------------
-# Script entry point
+# Quick self-test
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    eval_directory = "./signatures"
-    model_filepath = "model.pth"
+    test_dir   = "topomaps"
+    model_path = "model.pth"
 
-    predictions = load_and_predict(eval_directory, model_filepath)
+    results = load_and_predict(test_dir, model_path)
 
-    if not predictions:
-        print("No predictions were made.")
+    if not results:
+        print("No predictions produced.")
     else:
-        print(f"\nPredictions ({len(predictions)} files):")
-        for file_path, predicted_label in predictions.items():
-            try:
-                display_path = os.path.relpath(file_path)
-            except ValueError:
-                display_path = file_path
-            print(f"  '{display_path}': {predicted_label}")
+        correct = 0
+        for abs_path, pred_label in results.items():
+            # Ground-truth is encoded in the parent folder name: 'good' -> 1, 'bad' -> 0
+            parent_folder = os.path.basename(os.path.dirname(abs_path))
+            true_label    = 1 if parent_folder == 'good' else 0
+            if pred_label == true_label:
+                correct += 1
 
-        # --- Accuracy against ground-truth labels inferred from directory names ---
-        correct, total = 0, 0
-        for file_path, predicted_label in predictions.items():
-            parent_dir = os.path.basename(os.path.dirname(file_path))
-            if parent_dir in CLASS_SUBDIRECTORIES_MAP:
-                true_label = CLASS_SUBDIRECTORIES_MAP[parent_dir]
-                if predicted_label == true_label:
-                    correct += 1
-                total += 1
-
-        if total > 0:
-            print(f"\nTotal evaluated: {total}")
-            print(f"Correct:         {correct}")
-            print(f"Accuracy:        {correct / total:.4f} ({100.0 * correct / total:.2f}%)")
-        else:
-            print("\nNo files with recognizable class subdirectory names found for accuracy calculation.")
+        print(f"Total predictions : {len(results)}")
+        print(f"Accuracy          : {correct / len(results):.4f}")
