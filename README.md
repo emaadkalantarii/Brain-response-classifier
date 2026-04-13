@@ -20,7 +20,6 @@ This project applies computer vision to that problem: instead of a human expert 
 Input: EEG topomap image  →  CNN  →  Output: 0 (bad) or 1 (good)
 ```
 
-> **Note:** The dataset is not included in this repository. See the [Dataset](#dataset) section for the expected directory structure before running training.
 
 ---
 
